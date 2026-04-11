@@ -72,6 +72,48 @@ def launch_data_process_task(
                 torch.save(data, save_path)
 
 
+def launch_dpo_training_task(
+    accelerator: Accelerator,
+    dataset: torch.utils.data.Dataset,
+    model: DiffusionTrainingModule,
+    model_logger: ModelLogger,
+    learning_rate: float = 1e-5,
+    weight_decay: float = 1e-2,
+    num_workers: int = 1,
+    save_steps: int = None,
+    num_epochs: int = 1,
+    max_grad_norm: float = 1.0,
+    args = None,
+):
+    if args is not None:
+        learning_rate = args.learning_rate
+        weight_decay = args.weight_decay
+        num_workers = args.dataset_num_workers
+        save_steps = args.save_steps
+        num_epochs = args.num_epochs
+
+    optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+    model.to(device=accelerator.device)
+    model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
+    initialize_deepspeed_gradient_checkpointing(accelerator)
+    for epoch_id in range(num_epochs):
+        for data in tqdm(dataloader):
+            with accelerator.accumulate(model):
+                optimizer.zero_grad()
+                loss = model(data)
+                accelerator.backward(loss)
+                if max_grad_norm > 0:
+                    accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.step()
+                model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
+                scheduler.step()
+        if save_steps is None:
+            model_logger.on_epoch_end(accelerator, model, epoch_id)
+    model_logger.on_training_end(accelerator, model, save_steps)
+
+
 def initialize_deepspeed_gradient_checkpointing(accelerator: Accelerator):
     if getattr(accelerator.state, "deepspeed_plugin", None) is not None:
         ds_config = accelerator.state.deepspeed_plugin.deepspeed_config

@@ -11,18 +11,19 @@ def FlowMatchSFTLoss(pipe: BasePipeline, **inputs):
     
     noise = torch.randn_like(inputs["input_latents"])
     inputs["latents"] = pipe.scheduler.add_noise(inputs["input_latents"], noise, timestep)
+    # noise-x_0
     training_target = pipe.scheduler.training_target(inputs["input_latents"], noise, timestep)
     
     if "first_frame_latents" in inputs:
         inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]
     
     models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
-    noise_pred = pipe.model_fn(**models, **inputs, timestep=timestep)
+    noise_pred = pipe.model_fn(**models, **inputs, timestep=timestep) # [C F H W]
     
     if "first_frame_latents" in inputs:
         noise_pred = noise_pred[:, :, 1:]
         training_target = training_target[:, :, 1:]
-    
+    # 只支持batch_size=1，>1会出错
     loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
     loss = loss * pipe.scheduler.training_weight(timestep)
     return loss
@@ -67,6 +68,78 @@ def DirectDistillLoss(pipe: BasePipeline, **inputs):
         noise_pred = pipe.model_fn(**models, **inputs, timestep=timestep, progress_id=progress_id)
         inputs["latents"] = pipe.step(pipe.scheduler, progress_id=progress_id, noise_pred=noise_pred, **inputs)
     loss = torch.nn.functional.mse_loss(inputs["latents"].float(), inputs["input_latents"].float())
+    return loss
+
+# 增加dpo loss
+def FlowMatchDPOLoss(pipe: BasePipeline, dpo_beta=500.0, **inputs):
+    max_timestep_boundary = int(inputs.get("max_timestep_boundary", 1) * len(pipe.scheduler.timesteps))
+    min_timestep_boundary = int(inputs.get("min_timestep_boundary", 0) * len(pipe.scheduler.timesteps))
+
+    timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
+    timestep = pipe.scheduler.timesteps[timestep_id].to(dtype=pipe.torch_dtype, device=pipe.device)
+
+    input_latents_chosen = inputs["input_latents_chosen"]
+    input_latents_rejected = inputs["input_latents_rejected"]
+
+    noise = torch.randn_like(input_latents_chosen) # [C F H W]
+    if input_latents_rejected.shape != input_latents_chosen.shape:
+        raise ValueError("chosen video not match with rejected video")
+    
+    #偏好对用相同的noise
+    noisy_chosen = pipe.scheduler.add_noise(input_latents_chosen, noise, timestep)
+    target_chosen = pipe.scheduler.training_target(input_latents_chosen, noise, timestep)
+
+    noisy_rejected = pipe.scheduler.add_noise(input_latents_rejected, noise, timestep)
+    target_rejected = pipe.scheduler.training_target(input_latents_rejected, noise, timestep)
+
+    models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
+
+    inputs_base = {k: v for k, v in inputs.items() if k not in (
+        "input_latents_chosen", "input_latents_rejected", "input_latents", "dpo_beta",
+    )}
+
+    inputs_chosen = {**inputs_base, "latents": noisy_chosen}
+    inputs_rejected = {**inputs_base, "latents": noisy_rejected}
+
+    if "first_frame_latents" in inputs:
+        inputs_chosen["latents"][:, :, 0:1] = inputs["first_frame_latents"]
+        inputs_rejected["latents"][:, :, 0:1] = inputs["first_frame_latents"]
+
+    pred_chosen = pipe.model_fn(**models, **inputs_chosen, timestep=timestep) # [C F H W]
+    pred_rejected = pipe.model_fn(**models, **inputs_rejected, timestep=timestep)
+
+    dit = models.get("dit") or pipe.dit
+    # ref模型
+    with torch.no_grad():
+        dit.disable_adapter_layers()
+        try:
+            ref_pred_chosen = pipe.model_fn(**models, **inputs_chosen, timestep=timestep)
+            ref_pred_rejected = pipe.model_fn(**models, **inputs_rejected, timestep=timestep)
+        finally:
+            dit.enable_adapter_layers()
+
+    # 对于T2V可以不管
+    if "first_frame_latents" in inputs:
+        pred_chosen = pred_chosen[:, :, 1:]
+        pred_rejected = pred_rejected[:, :, 1:]
+        ref_pred_chosen = ref_pred_chosen[:, :, 1:]
+        ref_pred_rejected = ref_pred_rejected[:, :, 1:]
+        target_chosen = target_chosen[:, :, 1:]
+        target_rejected = target_rejected[:, :, 1:]
+
+    # 只支持batch_size=1，直接mean()不支持batch_size>1
+    # 这里根据Flow-DPO没有乘weight
+    model_loss_chosen = ((pred_chosen.float() - target_chosen.float())**2).mean()
+    model_loss_rejected = ((pred_rejected.float() - target_rejected.float())**2).mean()
+    model_diff = model_loss_chosen - model_loss_rejected
+    ref_loss_chosen = ((ref_pred_chosen.float() - target_chosen.float())**2).mean()
+    ref_loss_rejected = ((ref_pred_rejected.float() - target_rejected.float())**2).mean() 
+    ref_diff = ref_loss_chosen - ref_loss_rejected
+
+    scale_term = -0.5 * dpo_beta
+    inside_term = scale_term * (model_diff-ref_diff)
+    loss = -torch.nn.functional.logsigmoid(inside_term)
+
     return loss
 
 

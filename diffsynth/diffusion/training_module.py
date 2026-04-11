@@ -225,7 +225,7 @@ class DiffusionTrainingModule(torch.nn.Module):
         # Freeze untrainable models
         pipe.freeze_except([] if trainable_models is None else trainable_models.split(","))
         
-        # Preset LoRA
+        # Preset LoRA，在我们的训练中应该用不到
         if preset_lora_path is not None:
             pipe.load_lora(getattr(pipe, preset_lora_model), preset_lora_path)
         
@@ -260,7 +260,8 @@ class DiffusionTrainingModule(torch.nn.Module):
         # TODO: set `remove_unnecessary_params` to `True` by default
         remove_unnecessary_params=False,
         # TODO: move `loss_required_params` to `loss.py`
-        loss_required_params=("input_latents", "max_timestep_boundary", "min_timestep_boundary", "first_frame_latents", "video_latents", "audio_input_latents", "num_inference_steps"),
+        # 增加了dpo所用的latents
+        loss_required_params=("input_latents", "max_timestep_boundary", "min_timestep_boundary", "first_frame_latents", "video_latents", "audio_input_latents", "num_inference_steps", "input_latents_chosen", "input_latents_rejected"),
         force_remove_params_shared=tuple(),
         force_remove_params_posi=tuple(),
         force_remove_params_nega=tuple(),

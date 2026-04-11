@@ -1,5 +1,6 @@
 import torch, os, argparse, accelerate, warnings
 from diffsynth.core import UnifiedDataset
+from diffsynth.core.data.unified_dataset import DPOVideoDataset
 from diffsynth.core.data.operators import LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath
 from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
 from diffsynth.diffusion import *
@@ -23,6 +24,7 @@ class WanTrainingModule(DiffusionTrainingModule):
         task="sft",
         max_timestep_boundary=1.0,
         min_timestep_boundary=0.0,
+        dpo_beta=500.0,
     ):
         super().__init__()
         # Warning
@@ -54,13 +56,17 @@ class WanTrainingModule(DiffusionTrainingModule):
         self.task_to_loss = {
             "sft:data_process": lambda pipe, *args: args,
             "direct_distill:data_process": lambda pipe, *args: args,
+            "dpo:data_process": lambda pipe, *args: args,
             "sft": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchSFTLoss(pipe, **inputs_shared, **inputs_posi),
             "sft:train": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchSFTLoss(pipe, **inputs_shared, **inputs_posi),
             "direct_distill": lambda pipe, inputs_shared, inputs_posi, inputs_nega: DirectDistillLoss(pipe, **inputs_shared, **inputs_posi),
             "direct_distill:train": lambda pipe, inputs_shared, inputs_posi, inputs_nega: DirectDistillLoss(pipe, **inputs_shared, **inputs_posi),
+            "dpo": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchDPOLoss(pipe, dpo_beta=self.dpo_beta, **inputs_shared, **inputs_posi),
+            "dpo:train": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchDPOLoss(pipe, dpo_beta=self.dpo_beta, **inputs_shared, **inputs_posi),
         }
         self.max_timestep_boundary = max_timestep_boundary
         self.min_timestep_boundary = min_timestep_boundary
+        self.dpo_beta = dpo_beta
         
     def parse_extra_inputs(self, data, extra_inputs, inputs_shared):
         for extra_input in extra_inputs:
@@ -78,6 +84,8 @@ class WanTrainingModule(DiffusionTrainingModule):
         return inputs_shared
     
     def get_pipeline_inputs(self, data):
+        if self.task.startswith("dpo"):
+            return self._get_dpo_pipeline_inputs(data)
         inputs_posi = {"prompt": data["prompt"]}
         inputs_nega = {}
         inputs_shared = {
@@ -102,12 +110,65 @@ class WanTrainingModule(DiffusionTrainingModule):
         inputs_shared = self.parse_extra_inputs(data, self.extra_inputs, inputs_shared)
         return inputs_shared, inputs_posi, inputs_nega
     
+    # 增加dpo inputs 
+    def _get_dpo_pipeline_inputs(self, data):
+        video_chosen = data["video_chosen"]
+        video_rejected = data["video_rejected"]
+        inputs_posi = {"prompt": data["prompt"]}
+        inputs_nega = {}
+        inputs_shared = {
+            "input_video": video_chosen,
+            "input_video_rejected": video_rejected,
+            "height": video_chosen[0].size[1],
+            "width": video_chosen[0].size[0],
+            "num_frames": len(video_chosen),
+            "cfg_scale": 1,
+            "tiled": False,
+            "rand_device": self.pipe.device,
+            "use_gradient_checkpointing": self.use_gradient_checkpointing,
+            "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload,
+            "cfg_merge": False,
+            "vace_scale": 1,
+            "max_timestep_boundary": self.max_timestep_boundary,
+            "min_timestep_boundary": self.min_timestep_boundary,
+        }
+        # 之后可以在parse_extra_inputs增加处理mask
+        inputs_shared = self.parse_extra_inputs(data, self.extra_inputs, inputs_shared)
+        return inputs_shared, inputs_posi, inputs_nega
+
     def forward(self, data, inputs=None):
         if inputs is None: inputs = self.get_pipeline_inputs(data)
         inputs = self.transfer_data_to_device(inputs, self.pipe.device, self.pipe.torch_dtype)
+        if self.task.startswith("dpo") and not self.task.endswith(":data_process"):
+            return self._forward_dpo(inputs)
         for unit in self.pipe.units:
             inputs = self.pipe.unit_runner(unit, self.pipe, *inputs)
         loss = self.task_to_loss[self.task](self.pipe, *inputs)
+        return loss
+
+    def _forward_dpo(self, inputs):
+        inputs_shared, inputs_posi, inputs_nega = inputs
+        input_video_rejected = inputs_shared.pop("input_video_rejected", None)
+
+        for unit in self.pipe.units:
+            inputs_shared, inputs_posi, inputs_nega = self.pipe.unit_runner(
+                unit, self.pipe, inputs_shared, inputs_posi, inputs_nega
+            )
+
+        chosen_latents = inputs_shared["input_latents"]
+
+        with torch.no_grad():
+            video_rej_tensor = self.pipe.preprocess_video(input_video_rejected)
+            video_rej_tensor = video_rej_tensor.to(dtype=self.pipe.torch_dtype, device=self.pipe.device)
+            self.pipe.load_models_to_device(("vae",))
+            rejected_latents = self.pipe.vae.encode(
+                video_rej_tensor, device=self.pipe.device
+            ).to(dtype=self.pipe.torch_dtype, device=self.pipe.device)
+
+        inputs_shared["input_latents_chosen"] = chosen_latents
+        inputs_shared["input_latents_rejected"] = rejected_latents
+
+        loss = self.task_to_loss[self.task](self.pipe, inputs_shared, inputs_posi, inputs_nega)
         return loss
 
 
@@ -131,28 +192,37 @@ if __name__ == "__main__":
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         kwargs_handlers=[accelerate.DistributedDataParallelKwargs(find_unused_parameters=args.find_unused_parameters)],
     )
-    dataset = UnifiedDataset(
+    video_operator = UnifiedDataset.default_video_operator(
         base_path=args.dataset_base_path,
-        metadata_path=args.dataset_metadata_path,
-        repeat=args.dataset_repeat,
-        data_file_keys=args.data_file_keys.split(","),
-        main_data_operator=UnifiedDataset.default_video_operator(
-            base_path=args.dataset_base_path,
-            max_pixels=args.max_pixels,
-            height=args.height,
-            width=args.width,
-            height_division_factor=16,
-            width_division_factor=16,
-            num_frames=args.num_frames,
-            time_division_factor=4 if not args.framewise_decoding else 1,
-            time_division_remainder=1 if not args.framewise_decoding else 0,
-        ),
-        special_operator_map={
-            "animate_face_video": ToAbsolutePath(args.dataset_base_path) >> LoadVideo(args.num_frames, 4, 1, frame_processor=ImageCropAndResize(512, 512, None, 16, 16)),
-            "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudio(sr=16000),
-            "wantodance_music_path": ToAbsolutePath(args.dataset_base_path),
-        }
+        max_pixels=args.max_pixels,
+        height=args.height,
+        width=args.width,
+        height_division_factor=16,
+        width_division_factor=16,
+        num_frames=args.num_frames,
+        time_division_factor=4 if not args.framewise_decoding else 1,
+        time_division_remainder=1 if not args.framewise_decoding else 0,
     )
+    if args.task.startswith("dpo"):
+        dataset = DPOVideoDataset(
+            base_path=args.dataset_base_path,
+            metadata_path=args.dataset_metadata_path,
+            repeat=args.dataset_repeat,
+            video_operator=video_operator,
+        )
+    else:
+        dataset = UnifiedDataset(
+            base_path=args.dataset_base_path,
+            metadata_path=args.dataset_metadata_path,
+            repeat=args.dataset_repeat,
+            data_file_keys=args.data_file_keys.split(","),
+            main_data_operator=video_operator,
+            special_operator_map={
+                "animate_face_video": ToAbsolutePath(args.dataset_base_path) >> LoadVideo(args.num_frames, 4, 1, frame_processor=ImageCropAndResize(512, 512, None, 16, 16)),
+                "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudio(sr=16000),
+                "wantodance_music_path": ToAbsolutePath(args.dataset_base_path),
+            }
+        )
     model = WanTrainingModule(
         model_paths=args.model_paths,
         model_id_with_origin_paths=args.model_id_with_origin_paths,
@@ -174,6 +244,7 @@ if __name__ == "__main__":
         device="cpu" if args.initialize_model_on_cpu else accelerator.device,
         max_timestep_boundary=args.max_timestep_boundary,
         min_timestep_boundary=args.min_timestep_boundary,
+        dpo_beta=args.dpo_beta,
     )
     model_logger = ModelLogger(
         args.output_path,
@@ -182,9 +253,12 @@ if __name__ == "__main__":
     launcher_map = {
         "sft:data_process": launch_data_process_task,
         "direct_distill:data_process": launch_data_process_task,
+        "dpo:data_process": launch_data_process_task,
         "sft": launch_training_task,
         "sft:train": launch_training_task,
         "direct_distill": launch_training_task,
         "direct_distill:train": launch_training_task,
+        "dpo": launch_dpo_training_task,
+        "dpo:train": launch_dpo_training_task,
     }
     launcher_map[args.task](accelerator, dataset, model, model_logger, args=args)

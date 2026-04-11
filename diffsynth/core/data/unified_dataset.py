@@ -116,3 +116,104 @@ class UnifiedDataset(torch.utils.data.Dataset):
             if data1[k] != data2[k]:
                 return False
         return True
+
+
+class DPOVideoDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        base_path=None,
+        metadata_path=None,
+        repeat=1,
+        video_operator=None,
+        max_data_items=None,
+    ):
+        self.base_path = base_path
+        self.repeat = repeat
+        self.video_operator = video_operator
+        self.max_data_items = max_data_items
+        self.load_from_cache = False
+        self.data = []
+        if self.video_operator is None:
+            raise ValueError("DPOVideoDataset requires `video_operator`.")
+        if metadata_path is None:
+            raise ValueError("DPOVideoDataset requires `metadata_path`.")
+        self._load_metadata(metadata_path)
+        if len(self.data) == 0:
+            raise ValueError(f"DPOVideoDataset metadata is empty: {metadata_path}")
+
+    def _load_metadata(self, metadata_path):
+        if metadata_path is None:
+            return
+        if metadata_path.endswith(".json"):
+            with open(metadata_path, "r") as f:
+                self.data = json.load(f)
+        elif metadata_path.endswith(".jsonl"):
+            with open(metadata_path, 'r') as f:
+                for line in f:
+                    self.data.append(json.loads(line.strip()))
+        else:
+            metadata = pandas.read_csv(metadata_path)
+            self.data = [metadata.iloc[i].to_dict() for i in range(len(metadata))]
+
+    def __getitem__(self, data_id):
+        if len(self.data) == 0:
+            raise RuntimeError("DPOVideoDataset has no data.")
+        item_id = data_id % len(self.data)
+        item = self.data[item_id].copy()
+
+        # 检查数据
+        required_keys = ("prompt", "video_chosen", "video_rejected")
+        missing_keys = [key for key in required_keys if key not in item]
+        if len(missing_keys) > 0:
+            raise KeyError(f"DPO sample missing keys {missing_keys}. data_id={item_id}")
+
+        prompt = item["prompt"]
+        chosen_path = item["video_chosen"]
+        rejected_path = item["video_rejected"]
+        # 处理视频
+        video_chosen = self.video_operator(chosen_path)
+        video_rejected = self.video_operator(rejected_path)
+        
+        # 检查数据是否有问题
+        if not isinstance(video_chosen, list) or not isinstance(video_rejected, list):
+            raise TypeError(
+                f"DPO video_operator must return list frames. "
+                f"chosen_type={type(video_chosen)}, rejected_type={type(video_rejected)}, "
+                f"data_id={item_id}, chosen={chosen_path}, rejected={rejected_path}"
+            )
+        if len(video_chosen) == 0 or len(video_rejected) == 0:
+            raise ValueError(
+                f"DPO sample has empty frames. "
+                f"chosen_len={len(video_chosen)}, rejected_len={len(video_rejected)}, "
+                f"data_id={item_id}, chosen={chosen_path}, rejected={rejected_path}"
+            )
+        if len(video_chosen) != len(video_rejected):
+            raise ValueError(
+                f"DPO pair frame count mismatch. "
+                f"chosen_len={len(video_chosen)}, rejected_len={len(video_rejected)}, "
+                f"data_id={item_id}, chosen={chosen_path}, rejected={rejected_path}"
+            )
+        for frame_id, (frame_chosen, frame_rejected) in enumerate(zip(video_chosen, video_rejected)):
+            if not hasattr(frame_chosen, "size") or not hasattr(frame_rejected, "size"):
+                raise TypeError(
+                    f"DPO frame type must provide `.size`. "
+                    f"frame_id={frame_id}, chosen_type={type(frame_chosen)}, rejected_type={type(frame_rejected)}, "
+                    f"data_id={item_id}, chosen={chosen_path}, rejected={rejected_path}"
+                )
+            if frame_chosen.size != frame_rejected.size:
+                raise ValueError(
+                    f"DPO pair frame size mismatch. "
+                    f"frame_id={frame_id}, chosen_size={frame_chosen.size}, rejected_size={frame_rejected.size}, "
+                    f"data_id={item_id}, chosen={chosen_path}, rejected={rejected_path}"
+                )
+
+        return {
+            "prompt": prompt,
+            "video_chosen": video_chosen,
+            "video_rejected": video_rejected,
+        }
+
+    def __len__(self):
+        if self.max_data_items is not None:
+            return self.max_data_items
+        return len(self.data) * self.repeat
