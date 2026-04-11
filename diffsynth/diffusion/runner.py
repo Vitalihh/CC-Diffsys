@@ -26,14 +26,15 @@ def launch_training_task(
     
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
+    # 这里限制了batch_size=1
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
     model.to(device=accelerator.device)
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
     initialize_deepspeed_gradient_checkpointing(accelerator)
+    # 这里梯度累积有问题吗？可以先修改之后把梯度打印出来
     for epoch_id in range(num_epochs):
         for data in tqdm(dataloader):
             with accelerator.accumulate(model):
-                optimizer.zero_grad()
                 if dataset.load_from_cache:
                     loss = model({}, inputs=data)
                 else:
@@ -42,6 +43,7 @@ def launch_training_task(
                 optimizer.step()
                 model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
                 scheduler.step()
+                optimizer.zero_grad()
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
     model_logger.on_training_end(accelerator, model, save_steps)
@@ -57,7 +59,7 @@ def launch_data_process_task(
 ):
     if args is not None:
         num_workers = args.dataset_num_workers
-        
+    # 这里限制了batch_size=1
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=False, collate_fn=lambda x: x[0], num_workers=num_workers)
     model.to(device=accelerator.device)
     model, dataloader = accelerator.prepare(model, dataloader)
@@ -94,21 +96,23 @@ def launch_dpo_training_task(
 
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
+    # 这里限制了batch_size=1
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
     model.to(device=accelerator.device)
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
     initialize_deepspeed_gradient_checkpointing(accelerator)
+    # 这里梯度累积有问题吗？可以先修改之后把梯度打印出来
     for epoch_id in range(num_epochs):
         for data in tqdm(dataloader):
             with accelerator.accumulate(model):
-                optimizer.zero_grad()
                 loss = model(data)
                 accelerator.backward(loss)
-                if max_grad_norm > 0:
+                if accelerator.sync_gradients and max_grad_norm > 0:
                     accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
                 optimizer.step()
                 model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
                 scheduler.step()
+                optimizer.zero_grad()
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
     model_logger.on_training_end(accelerator, model, save_steps)

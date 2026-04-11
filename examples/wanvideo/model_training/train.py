@@ -28,6 +28,7 @@ class WanTrainingModule(DiffusionTrainingModule):
     ):
         super().__init__()
         # Warning
+        # 如果显存够用可以尝试不开
         if not use_gradient_checkpointing:
             warnings.warn("Gradient checkpointing is detected as disabled. To prevent out-of-memory errors, the training framework will forcibly enable gradient checkpointing.")
             use_gradient_checkpointing = True

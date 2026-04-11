@@ -323,7 +323,7 @@ accelerate launch examples/wanvideo/model_training/train.py \
   --learning_rate 1e-5 \
   --dpo_beta 0.1 \
   --num_epochs 3 \
-  --save_steps 200 \
+  --save_steps 20 \
   --output_path "./output/dpo_lora" \
   --use_gradient_checkpointing \
   --gradient_accumulation_steps 4 \
@@ -353,6 +353,5 @@ DPO 每步需要 **4 次 DiT 前向**（chosen×当前模型 + chosen×ref模型
 优化手段：
 - `--use_gradient_checkpointing`（已强制开启）
 - `--gradient_accumulation_steps 4` 或更大
-- `--num_frames 33` 减少帧数
-- `--height 320 --width 576` 降低分辨率
-- `--fp8_models dit` 使用 FP8 量化
+
+  
