@@ -318,8 +318,10 @@ accelerate launch examples/wanvideo/model_training/train.py \
   --dataset_metadata_path "./data/dpo_dataset/metadata.json" \
   --model_id_with_origin_paths "Wan-AI/Wan2.1-T2V-1.3B:diffusion_pytorch_model*.safetensors" \
   --lora_base_model "dit" \
+  --remove_prefix_in_ckpt "pipe.dit." \
   --lora_target_modules "q,k,v,o,ffn.0,ffn.2" \
   --lora_rank 32 \
+  --lora_alpha 64 \
   --learning_rate 1e-5 \
   --dpo_beta 0.1 \
   --num_epochs 3 \
@@ -329,8 +331,21 @@ accelerate launch examples/wanvideo/model_training/train.py \
   --gradient_accumulation_steps 4 \
   --num_frames 81 \
   --height 480 \
-  --width 832
-  
+  --width 832 \
+  --preview_steps 200 \
+  --preview_prompt "a cat sitting on a boat" \
+  --preview_num_inference_steps 50 \
+  --preview_num_frames 81 \
+  --preview_fps 16
+ 
+ # 首次训练（建议设置 save_steps，便于中断后精确续训）
+python examples/wanvideo/model_training/train.py ... --output_path ./out --save_steps 200 --max_train_steps 5000
+
+# 从 step=1200 续训到 step=5000
+python examples/wanvideo/model_training/train.py ... --output_path ./out --resume_step 1200 --max_train_steps 5000
+
+ 
+ 
   新增加的训练过程中预览
   accelerate launch examples/wanvideo/model_training/train.py \
   ... \
