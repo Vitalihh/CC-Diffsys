@@ -49,6 +49,7 @@ def add_lora_config(parser: argparse.ArgumentParser):
     parser.add_argument("--lora_base_model", type=str, default=None, help="Which model LoRA is added to.")
     parser.add_argument("--lora_target_modules", type=str, default="q,k,v,o,ffn.0,ffn.2", help="Which layers LoRA is added to.")
     parser.add_argument("--lora_rank", type=int, default=32, help="Rank of LoRA.")
+    parser.add_argument("--lora_alpha", type=float, default=None, help="LoRA alpha. If None, it defaults to `lora_rank`.")
     parser.add_argument("--lora_checkpoint", type=str, default=None, help="Path to the LoRA checkpoint. If provided, LoRA will be loaded from this checkpoint.")
     parser.add_argument("--preset_lora_path", type=str, default=None, help="Path to the preset LoRA checkpoint. If provided, this LoRA will be fused to the base model.")
     parser.add_argument("--preset_lora_model", type=str, default=None, help="Which model the preset LoRA is fused to.")

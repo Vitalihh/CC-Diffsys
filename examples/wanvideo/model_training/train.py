@@ -14,7 +14,7 @@ class WanTrainingModule(DiffusionTrainingModule):
         model_paths=None, model_id_with_origin_paths=None,
         tokenizer_path=None, audio_processor_path=None,
         trainable_models=None,
-        lora_base_model=None, lora_target_modules="", lora_rank=32, lora_checkpoint=None,
+        lora_base_model=None, lora_target_modules="", lora_rank=32, lora_alpha=None, lora_checkpoint=None,
         preset_lora_path=None, preset_lora_model=None,
         use_gradient_checkpointing=True,
         use_gradient_checkpointing_offload=False,
@@ -43,9 +43,15 @@ class WanTrainingModule(DiffusionTrainingModule):
         
         # Training mode
         self.switch_pipe_to_training_mode(
-            self.pipe, trainable_models,
-            lora_base_model, lora_target_modules, lora_rank, lora_checkpoint,
-            preset_lora_path, preset_lora_model,
+            self.pipe,
+            trainable_models=trainable_models,
+            lora_base_model=lora_base_model,
+            lora_target_modules=lora_target_modules,
+            lora_rank=lora_rank,
+            lora_checkpoint=lora_checkpoint,
+            lora_alpha=lora_alpha,
+            preset_lora_path=preset_lora_path,
+            preset_lora_model=preset_lora_model,
             task=task,
         )
         
@@ -317,6 +323,7 @@ if __name__ == "__main__":
         lora_base_model=args.lora_base_model,
         lora_target_modules=args.lora_target_modules,
         lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
         lora_checkpoint=args.lora_checkpoint,
         preset_lora_path=args.preset_lora_path,
         preset_lora_model=args.preset_lora_model,

@@ -330,6 +330,7 @@ accelerate launch examples/wanvideo/model_training/train.py \
   --num_frames 81 \
   --height 480 \
   --width 832
+  
   新增加的训练过程中预览
   accelerate launch examples/wanvideo/model_training/train.py \
   ... \
@@ -338,6 +339,22 @@ accelerate launch examples/wanvideo/model_training/train.py \
   --preview_num_inference_steps 8 \
   --preview_num_frames 81 \
   --preview_fps 15
+
+官方的脚本
+accelerate launch examples/wanvideo/model_training/train.py \
+  --dataset_base_path data/diffsynth_example_dataset/wanvideo/Wan2.1-T2V-1.3B \
+  --dataset_metadata_path data/diffsynth_example_dataset/wanvideo/Wan2.1-T2V-1.3B/metadata.csv \
+  --height 480 \
+  --width 832 \
+  --dataset_repeat 100 \
+  --model_id_with_origin_paths "Wan-AI/Wan2.1-T2V-1.3B:diffusion_pytorch_model*.safetensors,Wan-AI/Wan2.1-T2V-1.3B:models_t5_umt5-xxl-enc-bf16.pth,Wan-AI/Wan2.1-T2V-1.3B:Wan2.1_VAE.pth" \
+  --learning_rate 1e-4 \
+  --num_epochs 5 \
+  --remove_prefix_in_ckpt "pipe.dit." \
+  --output_path "./models/train/Wan2.1-T2V-1.3B_lora" \
+  --lora_base_model "dit" \
+  --lora_target_modules "q,k,v,o,ffn.0,ffn.2" \
+  --lora_rank 32
 
 ```
 

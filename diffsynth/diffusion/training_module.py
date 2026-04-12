@@ -215,7 +215,7 @@ class DiffusionTrainingModule(torch.nn.Module):
         self,
         pipe,
         trainable_models=None,
-        lora_base_model=None, lora_target_modules="", lora_rank=32, lora_checkpoint=None,
+        lora_base_model=None, lora_target_modules="", lora_rank=32, lora_checkpoint=None, lora_alpha=None,
         preset_lora_path=None, preset_lora_model=None,
         task="sft",
     ):
@@ -242,6 +242,7 @@ class DiffusionTrainingModule(torch.nn.Module):
                 getattr(pipe, lora_base_model),
                 target_modules=self.parse_lora_target_modules(getattr(pipe, lora_base_model), lora_target_modules),
                 lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
                 upcast_dtype=pipe.torch_dtype,
             )
             if lora_checkpoint is not None:
