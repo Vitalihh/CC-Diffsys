@@ -12,10 +12,12 @@ class ModelLogger:
         preview_kwargs=None,
     ):
         self.output_path = output_path
+        self.checkpoint_path = os.path.join(self.output_path, "checkpoints")
+        self.log_path = os.path.join(self.output_path, "logs")
         self.remove_prefix_in_ckpt = remove_prefix_in_ckpt
         self.state_dict_converter = state_dict_converter
         self.num_steps = 0
-        self.loss_log_path = os.path.join(self.output_path, "loss.csv")
+        self.loss_log_path = os.path.join(self.log_path, "loss.csv")
         self.loss_log_initialized = False
         self.preview_steps = max(0, int(preview_steps))
         self.preview_kwargs = {} if preview_kwargs is None else preview_kwargs
@@ -36,7 +38,7 @@ class ModelLogger:
         return reduced_loss
 
     def _append_loss(self, epoch_id, loss_value):
-        os.makedirs(self.output_path, exist_ok=True)
+        os.makedirs(self.log_path, exist_ok=True)
         if not self.loss_log_initialized:
             if not os.path.exists(self.loss_log_path) or os.path.getsize(self.loss_log_path) == 0:
                 with open(self.loss_log_path, "w", encoding="utf-8") as f:
@@ -87,8 +89,8 @@ class ModelLogger:
         if accelerator.is_main_process:
             state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
             state_dict = self.state_dict_converter(state_dict)
-            os.makedirs(self.output_path, exist_ok=True)
-            path = os.path.join(self.output_path, f"epoch-{epoch_id}.safetensors")
+            os.makedirs(self.checkpoint_path, exist_ok=True)
+            path = os.path.join(self.checkpoint_path, f"epoch-{epoch_id}.safetensors")
             accelerator.save(state_dict, path, safe_serialization=True)
 
 
@@ -103,6 +105,6 @@ class ModelLogger:
         if accelerator.is_main_process:
             state_dict = accelerator.unwrap_model(model).export_trainable_state_dict(state_dict, remove_prefix=self.remove_prefix_in_ckpt)
             state_dict = self.state_dict_converter(state_dict)
-            os.makedirs(self.output_path, exist_ok=True)
-            path = os.path.join(self.output_path, file_name)
+            os.makedirs(self.checkpoint_path, exist_ok=True)
+            path = os.path.join(self.checkpoint_path, file_name)
             accelerator.save(state_dict, path, safe_serialization=True)

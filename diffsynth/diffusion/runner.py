@@ -36,6 +36,10 @@ def _compute_epoch_resume(steps_per_epoch, num_epochs, resume_step, max_train_st
 
 
 def _state_dir(output_path, step):
+    return os.path.join(output_path, "training_state", f"step-{step}")
+
+
+def _legacy_state_dir(output_path, step):
     return os.path.join(output_path, f"accelerate_state_step-{step}")
 
 
@@ -43,12 +47,17 @@ def _load_accelerate_state_if_available(accelerator: Accelerator, model_logger: 
     if resume_step <= 0:
         return
     state_dir = _state_dir(model_logger.output_path, resume_step)
+    legacy_state_dir = _legacy_state_dir(model_logger.output_path, resume_step)
     if os.path.isdir(state_dir):
         accelerator.load_state(state_dir)
         print(f"Accelerate state loaded from: {state_dir}")
+    elif os.path.isdir(legacy_state_dir):
+        accelerator.load_state(legacy_state_dir)
+        print(f"Accelerate state loaded from legacy path: {legacy_state_dir}")
     else:
         raise FileNotFoundError(
-            f"Accelerate state not found for resume_step={resume_step}: {state_dir}. "
+            f"Accelerate state not found for resume_step={resume_step}: "
+            f"{state_dir} (or legacy path {legacy_state_dir}). "
             f"Please resume from a saved step where `{os.path.basename(state_dir)}` exists "
             f"under output_path."
         )
@@ -56,6 +65,7 @@ def _load_accelerate_state_if_available(accelerator: Accelerator, model_logger: 
 
 def _save_accelerate_state(accelerator: Accelerator, model_logger: ModelLogger, step: int):
     state_dir = _state_dir(model_logger.output_path, step)
+    os.makedirs(os.path.dirname(state_dir), exist_ok=True)
     accelerator.save_state(state_dir)
 
 
