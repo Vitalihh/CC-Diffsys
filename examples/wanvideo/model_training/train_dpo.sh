@@ -1,0 +1,26 @@
+accelerate launch examples/wanvideo/model_training/train.py \
+  --task "dpo" \
+  --dataset_base_path "./data/dpo_dataset" \
+  --dataset_metadata_path "./data/dpo_dataset/metadata.json" \
+  --model_id_with_origin_paths "Wan-AI/Wan2.1-T2V-1.3B:diffusion_pytorch_model*.safetensors" \
+  --lora_base_model "dit" \
+  --remove_prefix_in_ckpt "pipe.dit." \
+  --lora_target_modules "q,k,v,o,ffn.0,ffn.2" \
+  --lora_rank 32 \
+  --lora_alpha 64 \
+  --learning_rate 1e-5 \
+  --dpo_beta 500.0 \
+  --num_epochs 3 \
+  --save_steps 20 \
+  --output_path "./output/dpo_lora" \
+  --use_gradient_checkpointing \
+  --gradient_accumulation_steps 4 \
+  --num_frames 81 \
+  --height 480 \
+  --width 832 \
+  --preview_steps 20 \
+  --preview_prompt "a cat sitting on a boat" \
+  --preview_num_inference_steps 50 \
+  --preview_num_frames 81 \
+  --preview_fps 16
+  

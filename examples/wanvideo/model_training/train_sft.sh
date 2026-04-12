@@ -1,0 +1,22 @@
+accelerate launch train_sft.py \
+  --task "sft" \
+  --dataset_base_path data/diffsynth_example_dataset/wanvideo/Wan2.1-T2V-1.3B \
+  --dataset_metadata_path data/diffsynth_example_dataset/wanvideo/Wan2.1-T2V-1.3B/metadata.csv \
+  --height 480 \
+  --width 832 \
+  --dataset_repeat 2 \
+  --model_id_with_origin_paths "Wan-AI/Wan2.1-T2V-1.3B:diffusion_pytorch_model*.safetensors,Wan-AI/Wan2.1-T2V-1.3B:models_t5_umt5-xxl-enc-bf16.pth,Wan-AI/Wan2.1-T2V-1.3B:Wan2.1_VAE.pth" \
+  --learning_rate 1e-4 \
+  --num_epochs 3 \
+  --save_steps 20 \
+  --remove_prefix_in_ckpt "pipe.dit." \
+  --output_path "./models/train/sft_lora" \
+  --lora_base_model "dit" \
+  --lora_target_modules "q,k,v,o,ffn.0,ffn.2" \
+  --lora_rank 32 \
+  --lora_alpha 64 \
+  --preview_steps 20 \
+  --preview_prompt "a cat sitting on a boat" \
+  --preview_num_inference_steps 50 \
+  --preview_num_frames 81 \
+  --preview_fps 16

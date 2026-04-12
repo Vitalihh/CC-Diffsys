@@ -69,6 +69,26 @@ def _save_accelerate_state(accelerator: Accelerator, model_logger: ModelLogger, 
     accelerator.save_state(state_dir)
 
 
+def _print_training_plan(
+    accelerator: Accelerator,
+    steps_per_epoch: int,
+    effective_num_epochs: int,
+    resume_step: int,
+    max_train_steps: int,
+):
+    if not accelerator.is_main_process:
+        return
+    grad_accum_steps = int(getattr(accelerator, "gradient_accumulation_steps", 1))
+    total_steps = max_train_steps if max_train_steps is not None else effective_num_epochs * steps_per_epoch
+    remaining_steps = max(total_steps - resume_step, 0)
+    print("=== Training Plan ===")
+    print(f"epochs={effective_num_epochs}")
+    print(f"steps_per_epoch={steps_per_epoch}")
+    print(f"total_steps={total_steps}")
+    print(f"gradient_accumulation_steps={grad_accum_steps}")
+    print(f"remaining_steps_from_resume={remaining_steps}")
+
+
 def launch_training_task(
     accelerator: Accelerator,
     dataset: torch.utils.data.Dataset,
@@ -102,6 +122,13 @@ def launch_training_task(
     steps_per_epoch = len(dataloader)
     start_epoch, skip_steps_in_epoch, effective_num_epochs = _compute_epoch_resume(
         steps_per_epoch, num_epochs, resume_step, max_train_steps
+    )
+    _print_training_plan(
+        accelerator,
+        steps_per_epoch=steps_per_epoch,
+        effective_num_epochs=effective_num_epochs,
+        resume_step=resume_step,
+        max_train_steps=max_train_steps,
     )
     model_logger.num_steps = resume_step
     if max_train_steps is not None and resume_step >= max_train_steps:
@@ -208,6 +235,13 @@ def launch_dpo_training_task(
     steps_per_epoch = len(dataloader)
     start_epoch, skip_steps_in_epoch, effective_num_epochs = _compute_epoch_resume(
         steps_per_epoch, num_epochs, resume_step, max_train_steps
+    )
+    _print_training_plan(
+        accelerator,
+        steps_per_epoch=steps_per_epoch,
+        effective_num_epochs=effective_num_epochs,
+        resume_step=resume_step,
+        max_train_steps=max_train_steps,
     )
     model_logger.num_steps = resume_step
     if max_train_steps is not None and resume_step >= max_train_steps:
