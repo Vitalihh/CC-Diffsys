@@ -41,7 +41,7 @@ def launch_training_task(
                     loss = model(data)
                 accelerator.backward(loss)
                 optimizer.step()
-                model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
+                model_logger.on_step_end(accelerator, model, save_steps, loss=loss, epoch_id=epoch_id)
                 scheduler.step()
                 optimizer.zero_grad()
         if save_steps is None:
@@ -110,7 +110,7 @@ def launch_dpo_training_task(
                 if accelerator.sync_gradients and max_grad_norm > 0:
                     accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
                 optimizer.step()
-                model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
+                model_logger.on_step_end(accelerator, model, save_steps, loss=loss, epoch_id=epoch_id)
                 scheduler.step()
                 optimizer.zero_grad()
         if save_steps is None:

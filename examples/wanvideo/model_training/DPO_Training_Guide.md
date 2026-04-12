@@ -330,6 +330,15 @@ accelerate launch examples/wanvideo/model_training/train.py \
   --num_frames 81 \
   --height 480 \
   --width 832
+  新增加的训练过程中预览
+  accelerate launch examples/wanvideo/model_training/train.py \
+  ... \
+  --preview_steps 200 \
+  --preview_prompt "a cat sitting on a boat" \
+  --preview_num_inference_steps 8 \
+  --preview_num_frames 81 \
+  --preview_fps 15
+
 ```
 
 ---

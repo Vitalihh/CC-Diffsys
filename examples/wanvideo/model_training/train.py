@@ -2,6 +2,7 @@ import torch, os, argparse, accelerate, warnings
 from diffsynth.core import UnifiedDataset
 from diffsynth.core.data.unified_dataset import DPOVideoDataset
 from diffsynth.core.data.operators import LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath
+from diffsynth.utils.data import save_video
 from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
 from diffsynth.diffusion import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -68,6 +69,79 @@ class WanTrainingModule(DiffusionTrainingModule):
         self.max_timestep_boundary = max_timestep_boundary
         self.min_timestep_boundary = min_timestep_boundary
         self.dpo_beta = dpo_beta
+        self._preview_prompt_warning_emitted = False
+
+    def _snapshot_scheduler_state(self):
+        state = {}
+        scheduler = self.pipe.scheduler
+        for name in ("sigmas", "timesteps", "linear_timesteps_weights", "training"):
+            if hasattr(scheduler, name):
+                value = getattr(scheduler, name)
+                if isinstance(value, torch.Tensor):
+                    state[name] = value.clone()
+                else:
+                    state[name] = value
+        return state
+
+    def _restore_scheduler_state(self, state):
+        scheduler = self.pipe.scheduler
+        for name, value in state.items():
+            setattr(scheduler, name, value)
+
+    def generate_preview(
+        self,
+        output_path,
+        step,
+        epoch_id=-1,
+        prompt=None,
+        negative_prompt="",
+        num_inference_steps=8,
+        num_frames=81,
+        height=None,
+        width=None,
+        seed=0,
+        cfg_scale=1.0,
+        fps=15.0,
+    ):
+        if prompt is None or len(str(prompt).strip()) == 0:
+            if not self._preview_prompt_warning_emitted:
+                print("Preview generation skipped because `preview_prompt` is empty.")
+                self._preview_prompt_warning_emitted = True
+            return
+        height = int(height) if height is not None else 480
+        width = int(width) if width is not None else 832
+        num_frames = int(num_frames)
+        num_inference_steps = int(num_inference_steps)
+
+        preview_folder = os.path.join(output_path, "preview")
+        os.makedirs(preview_folder, exist_ok=True)
+        file_name = f"step-{step}.mp4" if epoch_id is None or epoch_id < 0 else f"epoch-{epoch_id}_step-{step}.mp4"
+        save_path = os.path.join(preview_folder, file_name)
+
+        scheduler_state = self._snapshot_scheduler_state()
+        module_training_states = {id(module): module.training for module in self.pipe.modules()}
+
+        try:
+            self.pipe.eval()
+            with torch.no_grad():
+                video = self.pipe(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    num_inference_steps=num_inference_steps,
+                    num_frames=num_frames,
+                    seed=seed,
+                    height=height,
+                    width=width,
+                    cfg_scale=cfg_scale,
+                    tiled=True,
+                    progress_bar_cmd=lambda x: x,
+                )
+            save_video(video, save_path, fps=float(fps), quality=5)
+            print(f"Preview video saved: {save_path}")
+        finally:
+            for module in self.pipe.modules():
+                module.training = module_training_states[id(module)]
+            self._restore_scheduler_state(scheduler_state)
         
     def parse_extra_inputs(self, data, extra_inputs, inputs_shared):
         for extra_input in extra_inputs:
@@ -183,6 +257,16 @@ def wan_parser():
     parser.add_argument("--min_timestep_boundary", type=float, default=0.0, help="Min timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).")
     parser.add_argument("--initialize_model_on_cpu", default=False, action="store_true", help="Whether to initialize models on CPU.")
     parser.add_argument("--framewise_decoding", default=False, action="store_true", help="Enable it if this model is a WanToDance global model.")
+    parser.add_argument("--preview_steps", type=int, default=0, help="Generate a preview video every N optimizer steps. Set 0 to disable.")
+    parser.add_argument("--preview_prompt", type=str, default=None, help="Prompt used for periodic preview generation.")
+    parser.add_argument("--preview_negative_prompt", type=str, default="", help="Negative prompt used for periodic preview generation.")
+    parser.add_argument("--preview_num_inference_steps", type=int, default=8, help="Inference steps used for each preview video.")
+    parser.add_argument("--preview_num_frames", type=int, default=81, help="Number of frames in each preview video.")
+    parser.add_argument("--preview_height", type=int, default=None, help="Height for preview video. Defaults to training height, then 480.")
+    parser.add_argument("--preview_width", type=int, default=None, help="Width for preview video. Defaults to training width, then 832.")
+    parser.add_argument("--preview_seed", type=int, default=0, help="Random seed used for periodic preview generation.")
+    parser.add_argument("--preview_cfg_scale", type=float, default=1.0, help="CFG scale used for periodic preview generation.")
+    parser.add_argument("--preview_fps", type=float, default=15.0, help="FPS of saved preview videos.")
     return parser
 
 
@@ -250,6 +334,18 @@ if __name__ == "__main__":
     model_logger = ModelLogger(
         args.output_path,
         remove_prefix_in_ckpt=args.remove_prefix_in_ckpt,
+        preview_steps=args.preview_steps,
+        preview_kwargs={
+            "prompt": args.preview_prompt,
+            "negative_prompt": args.preview_negative_prompt,
+            "num_inference_steps": args.preview_num_inference_steps,
+            "num_frames": args.preview_num_frames,
+            "height": args.preview_height if args.preview_height is not None else args.height,
+            "width": args.preview_width if args.preview_width is not None else args.width,
+            "seed": args.preview_seed,
+            "cfg_scale": args.preview_cfg_scale,
+            "fps": args.preview_fps,
+        },
     )
     launcher_map = {
         "sft:data_process": launch_data_process_task,
