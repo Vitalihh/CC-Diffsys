@@ -1,14 +1,16 @@
-accelerate launch train_sft.py \
+accelerate launch train.py \
   --task "sft" \
   --dataset_base_path data/diffsynth_example_dataset/wanvideo/Wan2.1-T2V-1.3B \
   --dataset_metadata_path data/diffsynth_example_dataset/wanvideo/Wan2.1-T2V-1.3B/metadata.csv \
   --height 480 \
   --width 832 \
-  --dataset_repeat 2 \
+  --dataset_repeat q \
+  --dataset_num_workers \
   --model_id_with_origin_paths "Wan-AI/Wan2.1-T2V-1.3B:diffusion_pytorch_model*.safetensors,Wan-AI/Wan2.1-T2V-1.3B:models_t5_umt5-xxl-enc-bf16.pth,Wan-AI/Wan2.1-T2V-1.3B:Wan2.1_VAE.pth" \
   --learning_rate 1e-4 \
   --num_epochs 3 \
   --save_steps 20 \
+  --gradient_accumulation_steps 4 \
   --remove_prefix_in_ckpt "pipe.dit." \
   --output_path "./models/train/sft_lora" \
   --lora_base_model "dit" \

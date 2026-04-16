@@ -217,3 +217,130 @@ class DPOVideoDataset(torch.utils.data.Dataset):
         if self.max_data_items is not None:
             return self.max_data_items
         return len(self.data) * self.repeat
+
+
+class MaskDPOVideoDataset(torch.utils.data.Dataset):
+    """
+    MaskDPO数据集，每个样本包含:
+    - prompt: mask DPO使用的文本提示
+    - video_chosen, video_rejected: mask DPO偏好对
+    - mask: 二值掩码
+    - prompt_sft: SFT使用的文本提示
+    - video_sft: 用于SFT loss
+    - prompt_vdpo: 全局DPO使用的文本提示
+    - video_vdpo_chosen, video_vdpo_rejected: 用于普通DPO loss
+    - strength: 
+    """
+    def __init__(
+        self,
+        base_path=None,
+        metadata_path=None,
+        repeat=1,
+        video_operator=None,
+        mask_operator=None,
+        max_data_items=None,
+    ):
+        self.base_path = base_path
+        self.repeat = repeat
+        self.video_operator = video_operator
+        self.mask_operator = mask_operator
+        self.max_data_items = max_data_items
+        self.load_from_cache = False
+        self.data = []
+        if self.video_operator is None:
+            raise ValueError("MaskDPOVideoDataset requires `video_operator`.")
+        if metadata_path is None:
+            raise ValueError("MaskDPOVideoDataset requires `metadata_path`.")
+        self._load_metadata(metadata_path)
+        if len(self.data) == 0:
+            raise ValueError(f"MaskDPOVideoDataset metadata is empty: {metadata_path}")
+
+    def _load_metadata(self, metadata_path):
+        if metadata_path is None:
+            return
+        if metadata_path.endswith(".json"):
+            with open(metadata_path, "r") as f:
+                self.data = json.load(f)
+        elif metadata_path.endswith(".jsonl"):
+            with open(metadata_path, 'r') as f:
+                for line in f:
+                    self.data.append(json.loads(line.strip()))
+        else:
+            metadata = pandas.read_csv(metadata_path)
+            self.data = [metadata.iloc[i].to_dict() for i in range(len(metadata))]
+
+    def _validate_video_pair(self, video_a, video_b, name_a, name_b, item_id):
+        for videos, name in [(video_a, name_a), (video_b, name_b)]:
+            if not isinstance(videos, list):
+                raise TypeError(f"MaskDPO {name} must be list of frames, got {type(videos)}. data_id={item_id}")
+            if len(videos) == 0:
+                raise ValueError(f"MaskDPO {name} has empty frames. data_id={item_id}")
+        if len(video_a) != len(video_b):
+            raise ValueError(
+                f"MaskDPO {name_a} and {name_b} frame count mismatch: "
+                f"{len(video_a)} vs {len(video_b)}. data_id={item_id}"
+            )
+        for frame_id, (fa, fb) in enumerate(zip(video_a, video_b)):
+            if not hasattr(fa, "size") or not hasattr(fb, "size"):
+                raise TypeError(f"MaskDPO frame must provide `.size`. frame_id={frame_id}, data_id={item_id}")
+            if fa.size != fb.size:
+                raise ValueError(
+                    f"MaskDPO {name_a}/{name_b} frame size mismatch at frame {frame_id}: "
+                    f"{fa.size} vs {fb.size}. data_id={item_id}"
+                )
+
+    def __getitem__(self, data_id):
+        if len(self.data) == 0:
+            raise RuntimeError("MaskDPOVideoDataset has no data.")
+        item_id = data_id % len(self.data)
+        item = self.data[item_id].copy()
+
+        required_keys = ("prompt", "video_chosen", "video_rejected", "mask", "strength",
+                         "prompt_sft", "video_sft",
+                         "prompt_vdpo", "video_vdpo_chosen", "video_vdpo_rejected")
+        missing_keys = [key for key in required_keys if key not in item]
+        if len(missing_keys) > 0:
+            raise KeyError(f"MaskDPO sample missing keys {missing_keys}. data_id={item_id}")
+
+        prompt = item["prompt"]
+        prompt_sft = item["prompt_sft"]
+        prompt_vdpo = item["prompt_vdpo"]
+        strength = item["strength"]
+
+        video_chosen = self.video_operator(item["video_chosen"])
+        video_rejected = self.video_operator(item["video_rejected"])
+        
+        if self.mask_operator is not None:
+            mask = self.mask_operator(item["mask"])
+        else:
+            mask = self.video_operator(item["mask"])
+        video_sft = self.video_operator(item["video_sft"])
+        video_vdpo_chosen = self.video_operator(item["video_vdpo_chosen"])
+        video_vdpo_rejected = self.video_operator(item["video_vdpo_rejected"])
+
+        # 校验mask dpo偏好对
+        self._validate_video_pair(video_chosen, video_rejected, "video_chosen", "video_rejected", item_id)
+        
+        # 校验sft视频
+        if not isinstance(video_sft, list) or len(video_sft) == 0:
+            raise ValueError(f"MaskDPO video_sft must be non-empty list. data_id={item_id}")
+        # 校验vdpo偏好对
+        self._validate_video_pair(video_vdpo_chosen, video_vdpo_rejected, "video_vdpo_chosen", "video_vdpo_rejected", item_id)
+
+        return {
+            "prompt": prompt,
+            "prompt_sft": prompt_sft,
+            "prompt_vdpo": prompt_vdpo,
+            "strength": strength,
+            "video_chosen": video_chosen,
+            "video_rejected": video_rejected,
+            "mask": mask,
+            "video_sft": video_sft,
+            "video_vdpo_chosen": video_vdpo_chosen,
+            "video_vdpo_rejected": video_vdpo_rejected,
+        }
+
+    def __len__(self):
+        if self.max_data_items is not None:
+            return self.max_data_items
+        return len(self.data) * self.repeat

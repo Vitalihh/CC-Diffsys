@@ -1,7 +1,6 @@
 from .base_pipeline import BasePipeline
 import torch
 
-
 def FlowMatchSFTLoss(pipe: BasePipeline, **inputs):
     max_timestep_boundary = int(inputs.get("max_timestep_boundary", 1) * len(pipe.scheduler.timesteps))
     min_timestep_boundary = int(inputs.get("min_timestep_boundary", 0) * len(pipe.scheduler.timesteps))
@@ -18,7 +17,7 @@ def FlowMatchSFTLoss(pipe: BasePipeline, **inputs):
         inputs["latents"][:, :, 0:1] = inputs["first_frame_latents"]
     
     models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
-    noise_pred = pipe.model_fn(**models, **inputs, timestep=timestep) # [C F H W]
+    noise_pred = pipe.model_fn(**models, **inputs, timestep=timestep) # [1 C F H W]
     
     if "first_frame_latents" in inputs:
         noise_pred = noise_pred[:, :, 1:]
@@ -71,7 +70,9 @@ def DirectDistillLoss(pipe: BasePipeline, **inputs):
     return loss
 
 # 增加dpo loss
-def FlowMatchDPOLoss(pipe: BasePipeline, dpo_beta=500.0, **inputs):
+def FlowMatchDPOLoss(pipe: BasePipeline, ref_dit: torch.nn.Module = None, dpo_beta=500.0, **inputs):
+    if ref_dit is None:
+        raise ValueError("`ref_dit` is required for DPO loss.")
     max_timestep_boundary = int(inputs.get("max_timestep_boundary", 1) * len(pipe.scheduler.timesteps))
     min_timestep_boundary = int(inputs.get("min_timestep_boundary", 0) * len(pipe.scheduler.timesteps))
 
@@ -108,15 +109,13 @@ def FlowMatchDPOLoss(pipe: BasePipeline, dpo_beta=500.0, **inputs):
     pred_chosen = pipe.model_fn(**models, **inputs_chosen, timestep=timestep) # [C F H W]
     pred_rejected = pipe.model_fn(**models, **inputs_rejected, timestep=timestep)
 
-    dit = models.get("dit") or pipe.dit
-    # ref模型
+    # 这里只替换被训练模型的dit作为ref_model
+    models_ref = dict(models)
+    models_ref["dit"] = ref_dit
+
     with torch.no_grad():
-        dit.disable_adapter_layers()
-        try:
-            ref_pred_chosen = pipe.model_fn(**models, **inputs_chosen, timestep=timestep)
-            ref_pred_rejected = pipe.model_fn(**models, **inputs_rejected, timestep=timestep)
-        finally:
-            dit.enable_adapter_layers()
+        ref_pred_chosen = pipe.model_fn(**models_ref, **inputs_chosen, timestep=timestep)
+        ref_pred_rejected = pipe.model_fn(**models_ref, **inputs_rejected, timestep=timestep)
 
     # 对于T2V可以不管
     if "first_frame_latents" in inputs:
@@ -138,6 +137,79 @@ def FlowMatchDPOLoss(pipe: BasePipeline, dpo_beta=500.0, **inputs):
 
     scale_term = -0.5 * dpo_beta
     inside_term = scale_term * (model_diff-ref_diff)
+    loss = -torch.nn.functional.logsigmoid(inside_term)
+
+    return loss
+
+
+# 增加mask dpo loss，只在mask区域计算DPO loss
+def FlowMatchMaskDPOLoss(pipe: BasePipeline, ref_dit: torch.nn.Module = None, dpo_beta=500.0, mask=None, **inputs):
+    if ref_dit is None:
+        raise ValueError("`ref_dit` is required for Mask DPO loss.")
+    if mask is None:
+        raise ValueError("`mask` is required for Mask DPO loss.")
+
+    max_timestep_boundary = int(inputs.get("max_timestep_boundary", 1) * len(pipe.scheduler.timesteps))
+    min_timestep_boundary = int(inputs.get("min_timestep_boundary", 0) * len(pipe.scheduler.timesteps))
+
+    timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
+    timestep = pipe.scheduler.timesteps[timestep_id].to(dtype=pipe.torch_dtype, device=pipe.device)
+
+    input_latents_chosen = inputs["input_latents_chosen"]
+    input_latents_rejected = inputs["input_latents_rejected"]
+    if "strength" not in inputs:
+        raise ValueError("`strength` is required for Mask DPO loss.")
+    strength = inputs["strength"]
+    if strength is None:
+        raise ValueError("`strength` is None in Mask DPO loss.")
+
+    noise = torch.randn_like(input_latents_chosen)
+    if input_latents_rejected.shape != input_latents_chosen.shape:
+        raise ValueError("chosen video not match with rejected video")
+
+    noisy_chosen = pipe.scheduler.add_noise(input_latents_chosen, noise, timestep)
+    target_chosen = pipe.scheduler.training_target(input_latents_chosen, noise, timestep)
+
+    noisy_rejected = pipe.scheduler.add_noise(input_latents_rejected, noise, timestep)
+    target_rejected = pipe.scheduler.training_target(input_latents_rejected, noise, timestep)
+
+    models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
+
+    inputs_base = {k: v for k, v in inputs.items() if k not in (
+        "input_latents_chosen", "input_latents_rejected", "input_latents", "dpo_beta", "strength",
+    )}
+
+    inputs_chosen = {**inputs_base, "latents": noisy_chosen}
+    inputs_rejected = {**inputs_base, "latents": noisy_rejected}
+    
+    pred_chosen = pipe.model_fn(**models, **inputs_chosen, timestep=timestep)
+    pred_rejected = pipe.model_fn(**models, **inputs_rejected, timestep=timestep)
+
+    models_ref = dict(models)
+    models_ref["dit"] = ref_dit
+
+    with torch.no_grad():
+        ref_pred_chosen = pipe.model_fn(**models_ref, **inputs_chosen, timestep=timestep)
+        ref_pred_rejected = pipe.model_fn(**models_ref, **inputs_rejected, timestep=timestep)
+
+    # [1 C F H W]
+    mask = mask.to(device=pred_chosen.device, dtype=torch.float32)
+    if mask.shape != pred_chosen.shape:
+        raise ValueError("Mask shape error")
+    mask_sum = mask.sum().clamp(min=1.0)
+
+    # 只在mask区域计算MSE
+    model_loss_chosen = ((pred_chosen.float() - target_chosen.float())**2 * mask).sum() / mask_sum
+    model_loss_rejected = ((pred_rejected.float() - target_rejected.float())**2 * mask).sum() / mask_sum
+    model_diff = model_loss_chosen - model_loss_rejected
+
+    ref_loss_chosen = ((ref_pred_chosen.float() - target_chosen.float())**2 * mask).sum() / mask_sum
+    ref_loss_rejected = ((ref_pred_rejected.float() - target_rejected.float())**2 * mask).sum() / mask_sum
+    ref_diff = ref_loss_chosen - ref_loss_rejected
+
+    alpha = (strength-0.75) / (0.95-0.75)
+    scale_term = -0.5 * dpo_beta * (1+alpha)
+    inside_term = scale_term * (model_diff - ref_diff)
     loss = -torch.nn.functional.logsigmoid(inside_term)
 
     return loss

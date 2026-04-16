@@ -44,7 +44,7 @@ def add_training_config(parser: argparse.ArgumentParser):
 def add_output_config(parser: argparse.ArgumentParser):
     parser.add_argument("--output_path", type=str, default="./models", help="Output save path.")
     parser.add_argument("--remove_prefix_in_ckpt", type=str, default="pipe.dit.", help="Remove prefix in ckpt.")
-    parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
+    parser.add_argument("--save_steps", type=int, default=None, help="Checkpoint saving interval in optimizer steps (after gradient accumulation). If None, checkpoints are saved every epoch.")
     return parser
 
 def add_lora_config(parser: argparse.ArgumentParser):
@@ -65,6 +65,12 @@ def add_gradient_config(parser: argparse.ArgumentParser):
 
 def add_dpo_config(parser: argparse.ArgumentParser):
     parser.add_argument("--dpo_beta", type=float, default=500.0, help="DPO temperature parameter. Controls preference learning strength.")
+    parser.add_argument(
+        "--dpo_ref_model_path",
+        type=str,
+        default=None,
+        help="Optional DiT checkpoint path used as the frozen DPO reference model. If None, a frozen copy of the initial DiT is used.",
+    )
     return parser
 
 def add_general_config(parser: argparse.ArgumentParser):
