@@ -161,7 +161,6 @@ class DPOVideoDataset(torch.utils.data.Dataset):
         item_id = data_id % len(self.data)
         item = self.data[item_id].copy()
 
-        # 检查数据
         required_keys = ("prompt", "video_chosen", "video_rejected")
         missing_keys = [key for key in required_keys if key not in item]
         if len(missing_keys) > 0:
@@ -170,11 +169,10 @@ class DPOVideoDataset(torch.utils.data.Dataset):
         prompt = item["prompt"]
         chosen_path = item["video_chosen"]
         rejected_path = item["video_rejected"]
-        # 处理视频
+
         video_chosen = self.video_operator(chosen_path)
         video_rejected = self.video_operator(rejected_path)
-        
-        # 检查数据是否有问题
+
         if not isinstance(video_chosen, list) or not isinstance(video_rejected, list):
             raise TypeError(
                 f"DPO video_operator must return list frames. "
@@ -221,15 +219,13 @@ class DPOVideoDataset(torch.utils.data.Dataset):
 
 class MaskDPOVideoDataset(torch.utils.data.Dataset):
     """
-    MaskDPO数据集，每个样本包含:
-    - prompt: mask DPO使用的文本提示
-    - video_chosen, video_rejected: mask DPO偏好对
-    - mask: 二值掩码
-    - prompt_sft: SFT使用的文本提示
-    - video_sft: 用于SFT loss
-    - prompt_vdpo: 全局DPO使用的文本提示
-    - video_vdpo_chosen, video_vdpo_rejected: 用于普通DPO loss
-    - strength: 
+    MaskDPO dataset. Each sample includes:
+    - prompt
+    - video_chosen, video_rejected
+    - mask
+    - prompt_sft
+    - video_sft
+    - strength
     """
     def __init__(
         self,
@@ -296,15 +292,13 @@ class MaskDPOVideoDataset(torch.utils.data.Dataset):
         item = self.data[item_id].copy()
 
         required_keys = ("prompt", "video_chosen", "video_rejected", "mask", "strength",
-                         "prompt_sft", "video_sft",
-                         "prompt_vdpo", "video_vdpo_chosen", "video_vdpo_rejected")
+                         "prompt_sft", "video_sft")
         missing_keys = [key for key in required_keys if key not in item]
         if len(missing_keys) > 0:
             raise KeyError(f"MaskDPO sample missing keys {missing_keys}. data_id={item_id}")
 
         prompt = item["prompt"]
         prompt_sft = item["prompt_sft"]
-        prompt_vdpo = item["prompt_vdpo"]
         strength = item["strength"]
 
         video_chosen = self.video_operator(item["video_chosen"])
@@ -315,32 +309,26 @@ class MaskDPOVideoDataset(torch.utils.data.Dataset):
         else:
             mask = self.video_operator(item["mask"])
         video_sft = self.video_operator(item["video_sft"])
-        video_vdpo_chosen = self.video_operator(item["video_vdpo_chosen"])
-        video_vdpo_rejected = self.video_operator(item["video_vdpo_rejected"])
 
-        # 校验mask dpo偏好对
+
         self._validate_video_pair(video_chosen, video_rejected, "video_chosen", "video_rejected", item_id)
         
-        # 校验sft视频
+
         if not isinstance(video_sft, list) or len(video_sft) == 0:
             raise ValueError(f"MaskDPO video_sft must be non-empty list. data_id={item_id}")
-        # 校验vdpo偏好对
-        self._validate_video_pair(video_vdpo_chosen, video_vdpo_rejected, "video_vdpo_chosen", "video_vdpo_rejected", item_id)
 
         return {
             "prompt": prompt,
             "prompt_sft": prompt_sft,
-            "prompt_vdpo": prompt_vdpo,
             "strength": strength,
             "video_chosen": video_chosen,
             "video_rejected": video_rejected,
             "mask": mask,
             "video_sft": video_sft,
-            "video_vdpo_chosen": video_vdpo_chosen,
-            "video_vdpo_rejected": video_vdpo_rejected,
         }
 
     def __len__(self):
         if self.max_data_items is not None:
             return self.max_data_items
         return len(self.data) * self.repeat
+

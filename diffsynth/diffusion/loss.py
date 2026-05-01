@@ -143,7 +143,7 @@ def FlowMatchDPOLoss(pipe: BasePipeline, ref_dit: torch.nn.Module = None, dpo_be
 
 
 # 增加mask dpo loss，只在mask区域计算DPO loss
-def FlowMatchMaskDPOLoss(pipe: BasePipeline, ref_dit: torch.nn.Module = None, dpo_beta=500.0, mask=None, **inputs):
+def FlowMatchMaskDPOLoss(pipe: BasePipeline, ref_dit: torch.nn.Module = None, dpo_beta=500.0, mask=None, return_metrics=False, **inputs):
     if ref_dit is None:
         raise ValueError("`ref_dit` is required for Mask DPO loss.")
     if mask is None:
@@ -201,16 +201,33 @@ def FlowMatchMaskDPOLoss(pipe: BasePipeline, ref_dit: torch.nn.Module = None, dp
     # 只在mask区域计算MSE
     model_loss_chosen = ((pred_chosen.float() - target_chosen.float())**2 * mask).sum() / mask_sum
     model_loss_rejected = ((pred_rejected.float() - target_rejected.float())**2 * mask).sum() / mask_sum
-    model_diff = model_loss_chosen - model_loss_rejected
-
     ref_loss_chosen = ((ref_pred_chosen.float() - target_chosen.float())**2 * mask).sum() / mask_sum
     ref_loss_rejected = ((ref_pred_rejected.float() - target_rejected.float())**2 * mask).sum() / mask_sum
-    ref_diff = ref_loss_chosen - ref_loss_rejected
+    
+    chosen_diff = model_loss_chosen - ref_loss_chosen
+    rejected_diff = model_loss_rejected - ref_loss_rejected
+    deta = 0.8
+    rejected_diff = rejected_diff * (1-deta) + rejected_diff.detach() * deta
 
     alpha = (strength-0.75) / (0.95-0.75)
     scale_term = -0.5 * dpo_beta * (1+alpha)
-    inside_term = scale_term * (model_diff - ref_diff)
+    inside_term = scale_term * (chosen_diff - rejected_diff)
     loss = -torch.nn.functional.logsigmoid(inside_term)
+
+    win_diff_reward = scale_term * (model_loss_chosen - ref_loss_chosen)
+    lose_diff_reward = scale_term * (model_loss_rejected - ref_loss_rejected)
+    reward_margin = win_diff_reward - lose_diff_reward
+    reward_acc = reward_margin > 0
+
+    if return_metrics:
+        metrics = {
+            "win_diff_reward": win_diff_reward.detach().float(),
+            "lose_diff_reward": lose_diff_reward.detach().float(),
+            "reward_margin": reward_margin.detach().float(),
+            "reward_acc": reward_acc.detach().float(),
+            "loss": loss.detach().float(),
+        }
+        return loss, metrics
 
     return loss
 

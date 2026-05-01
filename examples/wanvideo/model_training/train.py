@@ -220,6 +220,38 @@ class WanTrainingModule(DiffusionTrainingModule):
         self.min_timestep_boundary = min_timestep_boundary
         self.dpo_beta = dpo_beta
         self._preview_prompt_warning_emitted = False
+        self._accumulated_log_metric_sums = {}
+        self._accumulated_log_metric_count = 0
+
+    def _accumulate_log_metrics(self, metrics):
+        if metrics is None:
+            return
+        for name, value in metrics.items():
+            if isinstance(value, torch.Tensor):
+                metric_value = value.detach().float().reshape(-1).mean()
+            else:
+                metric_value = torch.tensor(float(value), device=self.pipe.device, dtype=torch.float32)
+            if metric_value.device != self.pipe.device:
+                metric_value = metric_value.to(self.pipe.device)
+            if name in self._accumulated_log_metric_sums:
+                self._accumulated_log_metric_sums[name] = self._accumulated_log_metric_sums[name] + metric_value
+            else:
+                self._accumulated_log_metric_sums[name] = metric_value
+        self._accumulated_log_metric_count += 1
+
+    def pop_accumulated_log_metrics(self):
+        if self._accumulated_log_metric_count <= 0 or len(self._accumulated_log_metric_sums) == 0:
+            return None
+        payload = {
+            "metric_sums": {
+                name: value.detach().float()
+                for name, value in self._accumulated_log_metric_sums.items()
+            },
+            "sample_count": self._accumulated_log_metric_count,
+        }
+        self._accumulated_log_metric_sums = {}
+        self._accumulated_log_metric_count = 0
+        return payload
 
     def _get_dpo_ref_dit(self):
         ref_dit = self.dpo_ref_models.get("dit")
@@ -387,9 +419,6 @@ class WanTrainingModule(DiffusionTrainingModule):
             "input_mask": data["mask"],
             "input_prompt_sft": data["prompt_sft"],
             "input_video_sft": data["video_sft"],
-            "input_prompt_vdpo": data["prompt_vdpo"],
-            "input_video_vdpo_chosen": data["video_vdpo_chosen"],
-            "input_video_vdpo_rejected": data["video_vdpo_rejected"],
             "input_strength": data["strength"],
             "height": video_chosen[0].size[1],
             "width": video_chosen[0].size[0],
@@ -514,9 +543,6 @@ class WanTrainingModule(DiffusionTrainingModule):
         input_mask = inputs_shared.pop("input_mask")
         input_prompt_sft = inputs_shared.pop("input_prompt_sft")
         input_video_sft = inputs_shared.pop("input_video_sft")
-        input_prompt_vdpo = inputs_shared.pop("input_prompt_vdpo")
-        input_video_vdpo_chosen = inputs_shared.pop("input_video_vdpo_chosen")
-        input_video_vdpo_rejected = inputs_shared.pop("input_video_vdpo_rejected")
         strength = inputs_shared.pop("input_strength")
 
 
@@ -540,12 +566,9 @@ class WanTrainingModule(DiffusionTrainingModule):
 
             rejected_latents = encode_video(input_video_rejected)
             sft_latents = encode_video(input_video_sft)
-            vdpo_chosen_latents = encode_video(input_video_vdpo_chosen)
-            vdpo_rejected_latents = encode_video(input_video_vdpo_rejected)
 
 
         sft_context = self._encode_prompt(input_prompt_sft)
-        vdpo_context = self._encode_prompt(input_prompt_vdpo)
 
         mask_tensor = self._process_mask(input_mask, chosen_latents.shape)
         mask_tensor = mask_tensor.to(dtype=self.pipe.torch_dtype, device=self.pipe.device)
@@ -557,26 +580,18 @@ class WanTrainingModule(DiffusionTrainingModule):
         maskdpo_inputs["input_latents_chosen"] = chosen_latents
         maskdpo_inputs["input_latents_rejected"] = rejected_latents
         maskdpo_inputs["strength"] = strength
-        mask_dpo_loss = FlowMatchMaskDPOLoss(
+        mask_dpo_loss, mask_dpo_metrics = FlowMatchMaskDPOLoss(
             self.pipe, ref_dit=self._get_dpo_ref_dit(),
-            dpo_beta=self.dpo_beta, mask=mask_tensor, **maskdpo_inputs
+            dpo_beta=self.dpo_beta, mask=mask_tensor, return_metrics=True, **maskdpo_inputs
         )
+        self._accumulate_log_metrics(mask_dpo_metrics)
 
         sft_inputs = {k: v for k, v in base_inputs.items() if k != "context"}
         sft_inputs["context"] = sft_context
         sft_inputs["input_latents"] = sft_latents
         sft_loss = FlowMatchSFTLoss(self.pipe, **sft_inputs)
 
-        vdpo_inputs = {k: v for k, v in base_inputs.items() if k != "context"}
-        vdpo_inputs["context"] = vdpo_context
-        vdpo_inputs["input_latents_chosen"] = vdpo_chosen_latents
-        vdpo_inputs["input_latents_rejected"] = vdpo_rejected_latents
-        vdpo_loss = FlowMatchDPOLoss(
-            self.pipe, ref_dit=self._get_dpo_ref_dit(),
-            dpo_beta=self.dpo_beta, **vdpo_inputs
-        )
-
-        loss = mask_dpo_loss + sft_loss + vdpo_loss
+        loss = mask_dpo_loss + sft_loss
         return loss
 
 

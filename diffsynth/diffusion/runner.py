@@ -302,6 +302,75 @@ def _print_training_plan(
     print("*" * 60)
 
 
+def _append_accumulated_custom_metrics_csv(model_logger: ModelLogger, step: int, epoch_id: int, global_count: int, metric_means: dict):
+    os.makedirs(model_logger.log_path, exist_ok=True)
+    metrics_path = os.path.join(model_logger.log_path, "maskdpo_metrics.csv")
+    ordered_names = ["win_diff_reward", "lose_diff_reward", "reward_margin", "reward_acc", "loss"]
+    names = [name for name in ordered_names if name in metric_means]
+    names += [name for name in metric_means.keys() if name not in names]
+
+    if not os.path.exists(metrics_path) or os.path.getsize(metrics_path) == 0:
+        header = ["step", "epoch", "global_batch_size"] + names
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            f.write(",".join(header) + "\n")
+
+    row_values = [str(int(step)), str(int(epoch_id)), str(int(global_count))]
+    row_values += [f"{float(metric_means[name]):.8f}" for name in names]
+    with open(metrics_path, "a", encoding="utf-8") as f:
+        f.write(",".join(row_values) + "\n")
+
+
+def _print_accumulated_custom_metrics(
+    accelerator: Accelerator,
+    model: torch.nn.Module,
+    model_logger: ModelLogger,
+    step: int,
+    epoch_id: int = -1,
+):
+    model_unwrapped = accelerator.unwrap_model(model)
+    pop_metrics_fn = getattr(model_unwrapped, "pop_accumulated_log_metrics", None)
+    if not callable(pop_metrics_fn):
+        return
+    payload = pop_metrics_fn()
+    if payload is None:
+        return
+
+    metric_sums = payload.get("metric_sums", {})
+    sample_count = int(payload.get("sample_count", 0))
+    if sample_count <= 0 or len(metric_sums) == 0:
+        return
+
+    count_tensor = torch.tensor([float(sample_count)], device=accelerator.device, dtype=torch.float32)
+    global_count = accelerator.gather(count_tensor).sum().item()
+    if global_count <= 0:
+        return
+
+    metric_means = {}
+    for name, local_sum in metric_sums.items():
+        if isinstance(local_sum, torch.Tensor):
+            local_sum_tensor = local_sum.detach().float().reshape(1)
+        else:
+            local_sum_tensor = torch.tensor([float(local_sum)], device=accelerator.device, dtype=torch.float32)
+        if local_sum_tensor.device != accelerator.device:
+            local_sum_tensor = local_sum_tensor.to(accelerator.device)
+        global_sum = accelerator.gather(local_sum_tensor).sum().item()
+        metric_means[name] = global_sum / global_count
+
+    if accelerator.is_main_process:
+        _append_accumulated_custom_metrics_csv(
+            model_logger=model_logger,
+            step=step,
+            epoch_id=epoch_id,
+            global_count=int(global_count),
+            metric_means=metric_means,
+        )
+        ordered_names = ["win_diff_reward", "lose_diff_reward", "reward_margin", "reward_acc", "loss"]
+        names = [name for name in ordered_names if name in metric_means]
+        names += [name for name in metric_means.keys() if name not in names]
+        message = ", ".join([f"{name}={metric_means[name]:.8f}" for name in names])
+        print(f"[metrics][step={step}] {message}")
+
+
 
 def launch_training_task(
     accelerator: Accelerator,
@@ -376,6 +445,13 @@ def launch_training_task(
                 optimizer.step()
                 if accelerator.sync_gradients:
                     model_logger.on_step_end(accelerator, model, save_steps, loss=loss, epoch_id=epoch_id)
+                    _print_accumulated_custom_metrics(
+                        accelerator,
+                        model,
+                        model_logger,
+                        model_logger.num_steps,
+                        epoch_id=epoch_id,
+                    )
                     if save_steps is not None and model_logger.num_steps % save_steps == 0:
                         _save_accelerate_state(accelerator, model_logger, optimizer, scheduler, model_logger.num_steps)
                 scheduler.step()
@@ -496,6 +572,13 @@ def launch_dpo_training_task(
                 optimizer.step()
                 if accelerator.sync_gradients:
                     model_logger.on_step_end(accelerator, model, save_steps, loss=loss, epoch_id=epoch_id)
+                    _print_accumulated_custom_metrics(
+                        accelerator,
+                        model,
+                        model_logger,
+                        model_logger.num_steps,
+                        epoch_id=epoch_id,
+                    )
                     if save_steps is not None and model_logger.num_steps % save_steps == 0:
                         _save_accelerate_state(accelerator, model_logger, optimizer, scheduler, model_logger.num_steps)
                 scheduler.step()
